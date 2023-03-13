@@ -1,92 +1,48 @@
-# carbs
+# Cost Aware pareto-Region Bayesian Search
 
+CARBS depends primarily on pytorch and pyro for the Gaussian Process model. To get started, clone this directory and run,
 
-
-## Getting started
-
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
-
-```
-cd existing_repo
-git remote add origin https://gitlab.com/generally-intelligent/carbs.git
-git branch -M main
-git push -uf origin main
+```bash
+pip install -e /path/to/carbs
 ```
 
-## Integrate with your tools
+## Using CARBS
 
-- [ ] [Set up project integrations](https://gitlab.com/generally-intelligent/carbs/-/settings/integrations)
+The primary CARBS interface is through `suggest` (which will return a new point to test) and `observe` (to report the result).
 
-## Collaborate with your team
+See `notebooks/carbs_demo.sync.ipynb` for an example of how to use the optimizer.
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Automatically merge when pipeline succeeds](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+Options for CARBS are described on the `CARBSParams` class in `carbs/utils.py`.
 
-## Test and Deploy
 
-Use the built-in continuous integration in GitLab.
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing(SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+## Internal Usage Guide
 
-***
+This example is based on the `avalon/agent` project in the codebase as of Aug 2022 (commit 85a9d44cfe4dd4b4c7357a244fc16d1625192082 if you want to follow the exact example). It will probably be out of date by the time you're reading this, but the details are less important than conveying the general idea of how this tool is used.
 
-# Editing this README
+Components:
+- the `bones` code (in this folder). You shouldn't need to understand or modify this.
+- your project (training code, etc). in this example, this is the code in `standalone/avalon/agent` (specifically the code used to train a PPO agent).
+- a python file that interfaces bones and your project. in this example, this is the file `standalone/avalon/opt_ppo.py`. this file:
+    - uses the Bones API to configure the hyperparameters to sweep over, to record the results of each run, to generate hyperparameter suggestions for each run in the optimization, and to push metrics to a wandb run specific to the bones optimizaiton. 
+    - imports, configures and launches your project's code for each run in the optimization loop.
+    - uses the computronium API to allocate compute resources to run each training run in the optimization loop.
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thank you to [makeareadme.com](https://www.makeareadme.com/) for this template.
 
-## Suggestions for a good README
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+Specifically, here's (loosely) what's happening inside a Bones run:
+- you launch an "experiment" (in the `science` terminology) for the overall bones experiment (using `science`)
+  - eg, from your local computer, run something like `python science/bin/science launch_experiment --project standalone/avalon --cluster_spec provider:physical,priority:4000,gpus:0 --name CARBS_RUN_NAME --command "opt_ppo.py bones run"`
+    - this is a CPU-only experiment, as it's just running the bones logic and initiating the launch of the the individual experiments onto separate resources.
+    - TBD: what priority to make this? doesn't really matter since i don't think we currently evict CPU containers.
+  - this calls that `opt_ppo.py` file with the command `bones run`, which sets up an  `OptimizationExperiment` and calls its `run()` method - this is the bones logic.
+- initialization (set up the bones wandb run, configure hyperparameters to optimize, etc)
+- optimization loop (in practice, multiple runs will be happening in parallel):
+  - bones generates a set of hyperparameters to use in this run (a "suggestion").
+    - see [this notion doc](notion.so/generallyintelligent/Ellie-s-BONES-readme-d565d9a7d8084bc1a85354fbdb2e22a4) for an explainer on how Bones actually models the hyperparameter space and generates suggestions.
+  - this gets compiled into a command to run on a new machine, which will run the actual experiment. This command will have a form like `python opt_ppo.py trainable train HYPERPARAM_FLAGS`. This initializes a `RegularTrainCommand` and calls its `train()` method, which is where you should implement the logic to initialize and launch your experiment.
+  - launches a new container somewhere using `computronium`, and passes it the training command.
+  - the experiment runs on the new container to completion
+  - the result is gathered - the overall "score" metric is captured (out of the experiment log output, i think), and this score is passed to bones to update the optimizer state. if the run fails, you can configure it to either record a score of 0, or ignore that result.
 
-## Name
-Choose a self-explaining name for your project.
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
