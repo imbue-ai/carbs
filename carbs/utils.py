@@ -1,6 +1,5 @@
 import math
 import os
-import typing
 from collections import OrderedDict
 from enum import Enum
 from pathlib import Path
@@ -11,23 +10,30 @@ from typing import Optional
 from typing import Sequence
 from typing import Sized
 from typing import Tuple
-from typing import Type
 from typing import Union
-from typing import cast
+from pathlib import Path
+from typing import Optional
 
 import attr
 import numpy as np
 import seaborn as sns
 import torch
 import wandb
-from carbs.serialization import Serializable
+from loguru import logger
 from matplotlib import pyplot as plt
 from scipy.special import wofz
 from torch import Tensor
 from torch.distributions import Normal
 
+from carbs.serialization import Serializable
+
 ParamType = Union[int, float, str, bool, Enum]
 ParamDictType = Dict[str, ParamType]
+
+
+class SwitchError(Exception):
+    def __init__(self, unmatched_case: Any) -> None:
+        super().__init__(f"Failed to match: {unmatched_case}")
 
 
 @attr.s(auto_attribs=True, hash=True)
@@ -40,6 +46,13 @@ class ParamSpace(Serializable):
 
     def drop_type(self) -> Any:
         return self
+
+
+@attr.s(auto_attribs=True, frozen=True)
+class Param:
+    name: str
+    space: ParamSpace
+    search_center: Union[float, int]
 
 
 @attr.s(auto_attribs=True, hash=True)
@@ -85,6 +98,12 @@ class LinearSpace(RealNumberSpace):
     min: float = float("-inf")
     max: float = float("+inf")
 
+    def __attrs_post_init__(self) -> None:
+        if self.is_integer and self.scale < 3:
+            logger.info(
+                "scale<3 on integer LinearSpace, so may not be able to search neighboring integers!"
+            )
+
     def basic_from_param(self, value: ParamType) -> float:
         assert isinstance(value, (int, float))
         return value / self.scale
@@ -97,7 +116,11 @@ class LinearSpace(RealNumberSpace):
 
     def round_tensor_in_basic(self, value: Tensor) -> Tensor:
         if self.is_integer:
-            return torch.round(value * self.scale / self.rounding_factor) * self.rounding_factor / self.scale
+            return (
+                torch.round(value * self.scale / self.rounding_factor)
+                * self.rounding_factor
+                / self.scale
+            )
         else:
             return value
 
@@ -127,7 +150,8 @@ class LogSpace(RealNumberSpace):
     def round_tensor_in_basic(self, value: Tensor) -> Tensor:
         if self.is_integer:
             rounded_value = (
-                torch.round(self.base ** (value * self.scale) / self.rounding_factor) * self.rounding_factor
+                torch.round(self.base ** (value * self.scale) / self.rounding_factor)
+                * self.rounding_factor
             )
             if self.base == 10:
                 return torch.log10(rounded_value) / self.scale
@@ -163,87 +187,6 @@ class LogitSpace(RealNumberSpace):
         return "logit"
 
 
-@attr.s(auto_attribs=True)
-class CategoricalSpace(ParamSpace):
-    category_values: Tuple[ParamType, ...]
-    category_probabilities: Tuple[float, ...]
-
-    def __attrs_post_init__(self) -> None:
-        assert len(self.category_values) == len(
-            self.category_probabilities
-        ), "category_names and category_probabilities must be equal length"
-        assert len(self.category_values) > 0, "Zero choices is invalid for CategoricalSpace"
-
-    def basic_from_param(self, value: ParamType) -> int:
-        assert value in self.category_values
-        return self.category_values.index(value)
-
-    def param_from_basic(self, value: int) -> ParamType:
-        return self.category_values[value]
-
-
-@attr.s(auto_attribs=True)
-class ConstantSpace(CategoricalSpace):
-    def __attrs_post_init__(self) -> None:
-        super(ConstantSpace, self).__attrs_post_init__()
-        assert len(self.category_values) == 1
-
-
-@attr.s(auto_attribs=True)
-class BooleanSpace(CategoricalSpace):
-    category_values: Tuple[bool, bool] = (False, True)
-    category_probabilities: Tuple[float, float] = (0.5, 0.5)
-
-    def basic_from_param(self, value: ParamType) -> int:
-        assert value in self.category_values
-        return self.category_values.index(value)
-
-    def param_from_basic(self, value: int) -> bool:
-        return self.category_values[value]
-
-
-def from_bayesmark(bayesmark_config: Dict[str, Dict]) -> typing.OrderedDict[str, ParamSpace]:
-    bones_config: typing.OrderedDict[str, ParamSpace] = OrderedDict()
-    for name, param in bayesmark_config.items():
-        if param["type"] in {"real", "int"}:
-            # RealNumberSpace
-            is_integer: bool
-            if param["type"] == "real":
-                is_integer = False
-            elif param["type"] == "int":
-                is_integer = True
-                # make range a little bigger so we don't exclude the endpoints (should be inclusive)
-                # This is now done later...
-                # param["range"] = (param["range"][0] - 0.1, param["range"][1] + 0.1)
-            else:
-                raise NotImplementedError()
-            space_type: Type[RealNumberSpace]
-            if param["space"] == "linear":
-                space_type = LinearSpace
-            elif param["space"] == "log":
-                space_type = LogSpace
-            elif param["space"] == "logit":
-                space_type = LogitSpace
-            else:
-                raise NotImplementedError
-
-            space = space_type(min=param["range"][0], max=param["range"][1], is_integer=is_integer)
-            with space.mutable_clone() as scaled_space:
-                scaled_space.scale = space.basic_from_param(param["range"][1]) - space.basic_from_param(
-                    param["range"][0]
-                )
-            bones_config[name] = scaled_space
-        elif param["type"] == "bool":
-            bones_config[name] = BooleanSpace()
-        elif param["type"] == "cat":
-            num_values = len(param["values"])
-            probabilities = tuple([1 / num_values] * num_values)
-            bones_config[name] = CategoricalSpace(
-                category_values=param["values"], category_probabilities=probabilities
-            )
-    return bones_config
-
-
 CategoricalTuple = Tuple[int, ...]
 SUGGESTION_ID_DICT_KEY = "suggestion_uuid"
 
@@ -262,7 +205,10 @@ def log_norm_cdf(z: Tensor):
     return torch.log(wofz(-z * 1j / math.sqrt(2)).real) - z**2 / 2 + math.log(0.5)
 
 
-def expected_improvement(mu: Tensor, variance: Tensor, best_mu: Tensor, exploration_bias: float = 0.5) -> Tensor:
+# See explanation for expected improvement in https://distill.pub/2020/bayesian-optimization/
+def expected_improvement(
+    mu: Tensor, variance: Tensor, best_mu: Tensor, exploration_bias: float = 0.5
+) -> Tensor:
     prior = Normal(0, 1)
     sigma = variance.sqrt()
     z = (mu - best_mu - exploration_bias) / sigma
@@ -270,12 +216,20 @@ def expected_improvement(mu: Tensor, variance: Tensor, best_mu: Tensor, explorat
     # ei: Tensor = sigma * torch.exp(prior.log_prob(z)) * (1 + z * torch.exp(log_norm_cdf(z) - prior.log_prob(z)))
     # simplified form:
     wofz_output = wofz(-z.cpu() * 1j / math.sqrt(2)).real.to(z.device)
-    ei: Tensor = sigma * torch.exp(prior.log_prob(z)) * (1 + z * wofz_output * math.sqrt(math.pi / 2))
+    ei: Tensor = (
+        sigma
+        * torch.exp(prior.log_prob(z))
+        * (1 + z * wofz_output * math.sqrt(math.pi / 2))
+    )
     return ei
 
 
 def probability_of_improvement(
-    mu: Tensor, variance: Tensor, best_mu: Tensor, better_direction_sign: int, exploration_bias: float = 0.0
+    mu: Tensor,
+    variance: Tensor,
+    best_mu: Tensor,
+    better_direction_sign: int,
+    exploration_bias: float = 0.0,
 ) -> Tensor:
     prior = Normal(0, 1)
     mu_improvement = (mu - best_mu) * better_direction_sign - exploration_bias
@@ -286,9 +240,9 @@ def probability_of_improvement(
 
 def aggregate_logical_and_across_dim(x: Tensor, dim: int = -1) -> Tensor:
     """
-    Takes in boolean x, aggregates across dimension dim
+    Takes in BoolTensor x, aggregates across dimension dim.
     """
-    return cast(Tensor, torch.min(torch.where(x, 1, 0), dim=dim).values > 0)
+    return torch.min(torch.where(x, 1, 0), dim=dim).values > 0
 
 
 def add_dict_key_prefix(input_dict: Dict[str, Any], prefix: str):
@@ -388,29 +342,48 @@ class WandbLoggingParams(Serializable):
 
 @attr.s(auto_attribs=True, collect_by_mro=True)
 class CARBSParams(Serializable):
+    """
+    Set `better_direction_sign`, `max_suggestion_cost` and `wandb_params` for your run.
+    I'm not aware of any situation in which we should change the other parameters -- they are mostly for testing.
+    """
+
     better_direction_sign: int = 1  # 1 for maximizing, -1 for minimizing
     seed: int = 0
-    num_random_samples: int = 4  # will do random suggestions until this many observations are made
+    num_random_samples: int = (
+        4  # will do random suggestions until this many observations are made
+    )
     is_wandb_logging_enabled: bool = True
     wandb_params: WandbLoggingParams = WandbLoggingParams()
+    checkpoint_dir: str = "/mnt/shared/checkpoints/"
+    s3_checkpoint_path: str = "s3://int8/checkpoints"
     is_saved_on_every_observation: bool = True
 
     initial_search_radius: float = 0.3  # Search radius in BASIC space
 
-    exploration_bias: float = 1.0  # hyperparameter biasing BO acquisition function toward exploration
+    exploration_bias: float = (
+        1.0  # hyperparameter biasing BO acquisition function toward exploration
+    )
 
     num_candidates_for_suggestion_per_dim: int = 100
 
-    resample_frequency: int = 5  # resample a pareto point every n observations, set 0 to disable
+    resample_frequency: int = (
+        5  # resample a pareto point every n observations, set 0 to disable
+    )
 
-    max_cost: Optional[float] = None  # Will not make suggestions with predicted cost above this value
+    max_suggestion_cost: Optional[float] = (
+        None  # Will not make suggestions with predicted cost above this value
+    )
 
-    min_pareto_cost_fraction: float = 0.2  # takes minimum cost for pareto set to be this percentile of cost data
+    min_pareto_cost_fraction: float = (
+        0.2  # takes minimum cost for pareto set to be this percentile of cost data
+    )
     is_pareto_group_selection_conservative: bool = True
     is_expected_improvement_pareto_value_clamped: bool = True
     is_expected_improvement_value_always_max: bool = False
 
-    outstanding_suggestion_estimator: OutstandingSuggestionEstimatorEnum = OutstandingSuggestionEstimatorEnum.THOMPSON
+    outstanding_suggestion_estimator: OutstandingSuggestionEstimatorEnum = (
+        OutstandingSuggestionEstimatorEnum.THOMPSON
+    )
 
 
 @attr.s(auto_attribs=True, collect_by_mro=True)
@@ -420,7 +393,9 @@ class SurrogateModelParams(Serializable):
     device: str = "cpu"
     min_category_observations: int = 3
     scale_length: float = 1
-    outstanding_suggestion_estimator: OutstandingSuggestionEstimatorEnum = OutstandingSuggestionEstimatorEnum.MEAN
+    outstanding_suggestion_estimator: OutstandingSuggestionEstimatorEnum = (
+        OutstandingSuggestionEstimatorEnum.MEAN
+    )
 
 
 @attr.s(auto_attribs=True, collect_by_mro=True)
@@ -435,13 +410,19 @@ class ObserveOutput:
 
 
 def load_observations_from_wandb_run(
-    run_name: str, prefix: str = "observation/", add_params: Optional[ParamDictType] = None
+    run_name: str,
+    prefix: str = "observation/",
+    add_params: Optional[ParamDictType] = None,
 ) -> List[ObservationInParam]:
     api = wandb.Api()
     run = api.run(run_name)
     history_df = run.history()
     observations: List[ObservationInParam] = []
-    for idx, row in history_df[[x for x in history_df.keys() if x.startswith(prefix)]].dropna().iterrows():
+    for idx, row in (
+        history_df[[x for x in history_df.keys() if x.startswith(prefix)]]
+        .dropna()
+        .iterrows()
+    ):
         input: Dict[str, ParamType] = {}
         if add_params is not None:
             input.update(add_params)
@@ -456,24 +437,46 @@ def load_observations_from_wandb_run(
     return observations
 
 
-def load_latest_checkpoint_from_wandb_run(run_path: str, temp_dir: Optional[str] = None) -> str:
+CARBS_CHECKPOINT_PREFIX = "carbs_"
+CARBS_CHECKPOINT_SUFFIX = "obs.pt"
+
+
+def get_checkpoint_obs_count(checkpoint_name: str) -> int:
+    return int(
+        checkpoint_name.removeprefix(CARBS_CHECKPOINT_PREFIX).removesuffix(
+            CARBS_CHECKPOINT_SUFFIX
+        )
+    )
+
+
+def load_latest_checkpoint_from_wandb_run(
+    run_path: str, temp_dir: Optional[str] = None
+) -> str:
     api = wandb.Api()
     run = api.run(run_path)
-    # TODO: make this not hard coded?
     checkpoint_filenames = [
-        file.name for file in run.files() if file.name.startswith("bones_") and file.name.endswith("obs.pt")
+        file.name
+        for file in run.files()
+        if file.name.startswith(CARBS_CHECKPOINT_PREFIX)
+        and file.name.endswith(CARBS_CHECKPOINT_SUFFIX)
     ]
-    checkpoint_filenames = sorted(checkpoint_filenames, key=lambda x: int(x[6:-6]))
+    checkpoint_filenames = sorted(checkpoint_filenames, key=get_checkpoint_obs_count)
     latest_checkpoint_filename = checkpoint_filenames[-1]
-    return load_checkpoint_from_wandb_run(run_path, latest_checkpoint_filename, temp_dir)
+    return load_checkpoint_from_wandb_run(
+        run_path, latest_checkpoint_filename, temp_dir
+    )
 
 
-def load_checkpoint_from_wandb_run(run_path: str, checkpoint_filename: str, temp_dir: Optional[str] = None) -> str:
+def load_checkpoint_from_wandb_run(
+    run_path: str, checkpoint_filename: str, temp_dir: Optional[str] = None
+) -> str:
     if temp_dir is None:
-        temp_dir = f"/tmp/bones/{run_path}"
+        temp_dir = f"/tmp/carbs/{run_path}"
         os.makedirs(temp_dir, exist_ok=True)
 
-    checkpoint_path = wandb.restore(checkpoint_filename, run_path=run_path, replace=True, root=temp_dir)
+    checkpoint_path = wandb.restore(
+        checkpoint_filename, run_path=run_path, replace=True, root=temp_dir
+    )
     assert checkpoint_path is not None, "Could not load checkpoint"
     return checkpoint_path.name
 
@@ -489,22 +492,30 @@ def ordered_dict_index(od: OrderedDict, value: Any) -> int:
     raise KeyError(f"{value} not found in {od}")
 
 
-def group_observations(observations_in_basic: List[ObservationInBasic]) -> List[Tuple[ObservationInBasic, ...]]:
+# All members of an ObservationGroup have the same parameters
+ObservationGroup = Tuple[ObservationInBasic, ...]
+
+
+def group_observations(
+    observations_in_basic: List[ObservationInBasic],
+) -> Tuple[ObservationGroup, ...]:
     """
     Gets observations grouped by matching input params
     """
-    outputs: List[Tuple[ObservationInBasic, ...]] = []
+    outputs: List[ObservationGroup] = []
     observations = observations_in_basic.copy()
     observations.sort(key=lambda x: tuple(v.item() for v in x.real_number_input))
     while len(observations) > 0:
         obs = observations.pop()
         nearby_obs = [obs]
         for i in range(len(observations) - 1, -1, -1):
-            if torch.all(torch.isclose(observations[i].real_number_input, obs.real_number_input)):
+            if torch.all(
+                torch.isclose(observations[i].real_number_input, obs.real_number_input)
+            ):
                 nearby_obs.append(observations.pop(i))
         outputs.append(tuple(nearby_obs))
 
-    return outputs
+    return tuple(outputs)
 
 
 def observation_group_cost(group: Sequence[ObservationInBasic]) -> float:
@@ -515,7 +526,7 @@ def observation_group_output(group: Sequence[ObservationInBasic]) -> float:
     return sum(obs.output for obs in group) / len(group)
 
 
-def pareto_area_from_groups(obs_groups: List[Tuple[ObservationInBasic, ...]]) -> float:
+def pareto_area_from_groups(obs_groups: Tuple[ObservationGroup, ...]) -> float:
     if len(obs_groups) < 2:
         return 0
     last_cost = observation_group_cost(obs_groups[0])
@@ -531,26 +542,35 @@ def pareto_area_from_groups(obs_groups: List[Tuple[ObservationInBasic, ...]]) ->
 
 
 def get_pareto_groups(
-    grouped_observations: List[Tuple[ObservationInBasic, ...]],
+    grouped_observations: Tuple[ObservationGroup, ...],
     min_pareto_cost_fraction: float,
     better_direction_sign: int,
-) -> List[Tuple[ObservationInBasic, ...]]:
+) -> Tuple[ObservationGroup, ...]:
     min_pareto_cost = np.quantile(
-        np.array([x.cost for group in grouped_observations for x in group]), min_pareto_cost_fraction
+        np.array([x.cost for group in grouped_observations for x in group]),
+        min_pareto_cost_fraction,
     )
     observations_below_min_threshold = [
-        group for group in grouped_observations if observation_group_cost(group) <= min_pareto_cost
+        group
+        for group in grouped_observations
+        if observation_group_cost(group) <= min_pareto_cost
     ]
 
-    group_output_pos_better = lambda x: observation_group_output(x) * better_direction_sign
-    first_pareto_group = max(observations_below_min_threshold, key=group_output_pos_better)
+    group_output_pos_better = (
+        lambda x: observation_group_output(x) * better_direction_sign
+    )
+    first_pareto_group = max(
+        observations_below_min_threshold, key=group_output_pos_better
+    )
 
     remaining_observations = [
-        group for group in grouped_observations if observation_group_cost(group) > min_pareto_cost
+        group
+        for group in grouped_observations
+        if observation_group_cost(group) > min_pareto_cost
     ]
     remaining_observations.sort(key=observation_group_cost)
 
-    pareto_groups: List[Tuple[ObservationInBasic, ...]] = [first_pareto_group]
+    pareto_groups: List[ObservationGroup] = [first_pareto_group]
     best_output = group_output_pos_better(first_pareto_group)
     for obs_group in remaining_observations:
         mean_output = group_output_pos_better(obs_group)
@@ -558,24 +578,39 @@ def get_pareto_groups(
             pareto_groups.append(obs_group)
             best_output = mean_output
 
-    return pareto_groups
+    return tuple(pareto_groups)
 
 
 def get_pareto_groups_conservative(
-    grouped_observations: List[Tuple[ObservationInBasic, ...]],
+    grouped_observations: Tuple[ObservationGroup, ...],
     min_pareto_cost_fraction: float,
     better_direction_sign: int,
-) -> List[Tuple[ObservationInBasic, ...]]:
+) -> Tuple[ObservationGroup, ...]:
     """
     Just like get_pareto_groups but prefers groups with multiple samples. A single sample can only be "better" if
-    it is better than the max of the previous group
+    it is better than the max of the previous group. However, a multiple sample group is better if the mean is higher.
+    For example, with better_direction_sign=1:
+
+    Group A: ((output=0,cost=1),(output=1,cost=1))       # mean=0.5
+    Group B: ((output=0.6,cost=2))                       # mean=0.6
+    Group C: ((output=0.55,cost=3),(output=0.75,cost=3)) # mean=0.65
+    Group D: ((output=0.8,cost=4))                       # mean=0.8
+
+    With the normal pareto algorithm, A, B, C and D would all be in the pareto front. With this algorithm, groups
+    A, C and D will be in the pareto front. B will not be included because it is not greater than the max of group A.
+
+    The purpose of this is to reduce thrash in which groups are used as search centers in noisy areas of search space.
+
     """
 
     min_pareto_cost = np.quantile(
-        np.array([x.cost for group in grouped_observations for x in group]), min_pareto_cost_fraction
+        np.array([x.cost for group in grouped_observations for x in group]),
+        min_pareto_cost_fraction,
     )
     observations_below_min_threshold = [
-        group for group in grouped_observations if observation_group_cost(group) <= min_pareto_cost
+        group
+        for group in grouped_observations
+        if observation_group_cost(group) <= min_pareto_cost
     ]
     resampled_observations_below_min_threshold = [
         group for group in observations_below_min_threshold if len(group) > 1
@@ -585,16 +620,24 @@ def get_pareto_groups_conservative(
     if len(resampled_observations_below_min_threshold) > 0:
         observations_below_min_threshold = resampled_observations_below_min_threshold
 
-    group_output_pos_better = lambda x: observation_group_output(x) * better_direction_sign
-    max_group_output_pos_better = lambda x: max([obs.output * better_direction_sign for obs in x])
-    first_pareto_group = max(observations_below_min_threshold, key=group_output_pos_better)
+    group_output_pos_better = (
+        lambda x: observation_group_output(x) * better_direction_sign
+    )
+    max_group_output_pos_better = lambda x: max(
+        [obs.output * better_direction_sign for obs in x]
+    )
+    first_pareto_group = max(
+        observations_below_min_threshold, key=group_output_pos_better
+    )
 
     remaining_observations = [
-        group for group in grouped_observations if observation_group_cost(group) > min_pareto_cost
+        group
+        for group in grouped_observations
+        if observation_group_cost(group) > min_pareto_cost
     ]
     remaining_observations.sort(key=observation_group_cost)
 
-    pareto_groups: List[Tuple[ObservationInBasic, ...]] = [first_pareto_group]
+    pareto_groups: List[ObservationGroup] = [first_pareto_group]
     best_output = group_output_pos_better(first_pareto_group)
     best_output_max = max_group_output_pos_better(first_pareto_group)
     for obs_group in remaining_observations:
@@ -608,12 +651,12 @@ def get_pareto_groups_conservative(
             best_output = mean_output
             best_output_max = max_group_output_pos_better(obs_group)
 
-    return pareto_groups
+    return tuple(pareto_groups)
 
 
 def get_pareto_curve_plot(
     observations: List[ObservationInBasic],
-    pareto_groups: List[Tuple[ObservationInBasic, ...]],
+    pareto_groups: Tuple[ObservationGroup, ...],
     save_dir: Optional[str] = None,
     obs_count: Optional[int] = None,
 ) -> Optional[str]:

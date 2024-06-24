@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "carbs"
+version = "0.1.0"
+readme = "README.md"
+dependencies = [
+    "attrs",
+    "cattrs",
+    "loguru",
+    "numpy",
+    "pyro-ppl",
+    "scikit-learn",
+    "seaborn",
+    "torch",
+    "wandb",
+]
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = ["carbs"]
+
+[tool.pytest.ini_options]
+addopts = ["--ignore-glob=**/quarantine/**", "--ignore-glob=**/notebooks/**"]
