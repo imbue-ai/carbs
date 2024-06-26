@@ -6,6 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "carbs"
 version = "0.1.0"
 readme = "README.md"
+license = {file = "LICENSE.txt"}
+authors = [
+  {name = "Imbue", email = "abe@generallyintelligent.com"},
+]
 dependencies = [
     "attrs",
     "cattrs",

@@ -354,7 +354,7 @@ class CARBSParams(Serializable):
     )
     is_wandb_logging_enabled: bool = True
     wandb_params: WandbLoggingParams = WandbLoggingParams()
-    checkpoint_dir: str = "/mnt/shared/checkpoints/"
+    checkpoint_dir: str = "checkpoints/"
     s3_checkpoint_path: str = "s3://int8/checkpoints"
     is_saved_on_every_observation: bool = True
 

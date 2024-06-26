@@ -825,7 +825,8 @@ class CARBS:
 
     def _autosave(self) -> None:
         filename = f"{CARBS_CHECKPOINT_PREFIX}{self.observation_count}{CARBS_CHECKPOINT_SUFFIX}"
-        self.save_to_file(filename, upload_to_wandb=True)
+        self.save_to_file(filename,
+            upload_to_wandb=self.config.is_wandb_logging_enabled)
 
     @staticmethod
     def load_from_file(
