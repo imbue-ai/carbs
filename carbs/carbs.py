@@ -825,8 +825,9 @@ class CARBS:
 
     def _autosave(self) -> None:
         filename = f"{CARBS_CHECKPOINT_PREFIX}{self.observation_count}{CARBS_CHECKPOINT_SUFFIX}"
-        self.save_to_file(filename,
-            upload_to_wandb=self.config.is_wandb_logging_enabled)
+        self.save_to_file(
+            filename, upload_to_wandb=self.config.is_wandb_logging_enabled
+        )
 
     @staticmethod
     def load_from_file(
@@ -879,7 +880,7 @@ class CARBS:
         checkpoint_path = (
             Path(self.config.checkpoint_dir) / self.experiment_name / filename
         )
-        checkpoint_path.parent.mkdir(exist_ok=True)
+        checkpoint_path.parent.mkdir(exist_ok=True, parents=True)
         torch.save(self.get_state_dict(), checkpoint_path)
         if upload_to_wandb:
             wandb.save(checkpoint_path)

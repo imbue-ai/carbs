@@ -31,11 +31,6 @@ ParamType = Union[int, float, str, bool, Enum]
 ParamDictType = Dict[str, ParamType]
 
 
-class SwitchError(Exception):
-    def __init__(self, unmatched_case: Any) -> None:
-        super().__init__(f"Failed to match: {unmatched_case}")
-
-
 @attr.s(auto_attribs=True, hash=True)
 class ParamSpace(Serializable):
     def basic_from_param(self, value: ParamType) -> Any:
@@ -271,52 +266,6 @@ class SuggestionInBasic(Serializable):
     log_info: Dict[str, float] = attr.Factory(dict)
 
 
-@attr.s(auto_attribs=True, collect_by_mro=True)
-class ObservationInSurrogate(Serializable):
-    input_in_natural: Tensor
-    input_in_basic: Tensor
-    value_in_surrogate: Tensor
-    variance: Tensor
-    probability: Tensor
-    information_gain: Tensor
-    distance_to_nearest_observation: Tensor
-
-
-class AcquisitionFunctionEnum(Enum):
-    EXPECTED_IMPROVEMENT = "EXPECTED_IMPROVEMENT"
-    PROBABILITY_OF_IMPROVEMENT = "PROBABILITY_OF_IMPROVEMENT"
-
-
-class SearchSpaceAcquisitionBiasEnum(Enum):
-    PROBABILITY = "PROBABILITY"
-    INFORMATION_GAIN = "INFORMATION_GAIN"
-    NONE = "NONE"
-
-
-class SurrogateFunctionEnum(Enum):
-    STANDARDIZE = "STANDARDIZE"
-    STANDARDIZE_LOG_NEG = "STANDARDIZE_LOG_NEG"
-
-
-class UtilityFunctionEnum(Enum):
-    IDENTITY = "IDENTITY"
-    SORTED_INDEX = "SORTED_INDEX"
-    CONFIDENCE_BOUND = "CONFIDENCE_BOUND"
-
-
-class SearchDistributionFunctionEnum(Enum):
-    NORMAL = "NORMAL"
-    CAUCHY = "CAUCHY"
-
-
-class QuasiRandomSamplerEnum(Enum):
-    RANDOM = "RANDOM"
-    HALTON = "HALTON"
-    SCR_HALTON = "SCR_HALTON"
-    SOBOL = "SOBOL"
-    SCR_SOBOL = "SCR_SOBOL"
-
-
 class OutstandingSuggestionEstimatorEnum(Enum):
     MEAN = "MEAN"
     CONSTANT = "CONSTANT"
@@ -347,18 +296,22 @@ class CARBSParams(Serializable):
     I'm not aware of any situation in which we should change the other parameters -- they are mostly for testing.
     """
 
-    better_direction_sign: int = 1  # 1 for maximizing, -1 for minimizing
+    better_direction_sign: int = attr.field(
+        validator=attr.validators.in_([-1, 1]), default=1
+    )  # 1 for maximizing, -1 for minimizing
     seed: int = 0
-    num_random_samples: int = (
-        4  # will do random suggestions until this many observations are made
-    )
+
+    # will do random suggestions until this many observations are made
+    num_random_samples: int = attr.field(validator=attr.validators.ge(1), default=4)
     is_wandb_logging_enabled: bool = True
     wandb_params: WandbLoggingParams = WandbLoggingParams()
     checkpoint_dir: str = "checkpoints/"
     s3_checkpoint_path: str = "s3://int8/checkpoints"
     is_saved_on_every_observation: bool = True
 
-    initial_search_radius: float = 0.3  # Search radius in BASIC space
+    initial_search_radius: float = attr.field(
+        validator=attr.validators.gt(0), default=0.3
+    )
 
     exploration_bias: float = (
         1.0  # hyperparameter biasing BO acquisition function toward exploration
@@ -374,8 +327,9 @@ class CARBSParams(Serializable):
         None  # Will not make suggestions with predicted cost above this value
     )
 
-    min_pareto_cost_fraction: float = (
-        0.2  # takes minimum cost for pareto set to be this percentile of cost data
+    # takes minimum cost for pareto set to be this percentile of cost data
+    min_pareto_cost_fraction: float = attr.field(
+        validator=attr.validators.ge(0), default=0.2
     )
     is_pareto_group_selection_conservative: bool = True
     is_expected_improvement_pareto_value_clamped: bool = True
